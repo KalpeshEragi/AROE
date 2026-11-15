@@ -234,6 +234,55 @@ async def test_error_inside_stream_fails_non_streaming_request(backend):
     assert sched.status()["running"] == []
 
 
+async def wait_running(sched, n=1, timeout=3.0):
+    deadline = time.time() + timeout
+    while len(sched.status()["running"]) < n:
+        assert time.time() < deadline, "job never started"
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.anyio
+async def test_interactive_preempts_background_non_streaming_chat(backend):
+    fake, url = backend
+    fake.reset(n_tokens=60, delay=0.02)  # ~1.2 s per generation
+    async with gateway(url, preempt=True) as (c, sched, ev):
+        bg_task = asyncio.create_task(c.post("/v1/chat/completions", json=CHAT,
+                                             headers={"X-LRM-Priority": "background"}))
+        await wait_running(sched)
+        await asyncio.sleep(0.2)  # let the background job generate some tokens
+        r_i = await c.post("/v1/chat/completions", json={**CHAT, "stream": True},
+                           headers={"X-LRM-Priority": "interactive"})
+        r_bg = await bg_task
+    assert r_i.status_code == 200 and r_bg.status_code == 200
+    # Background still gets its complete answer, from the rerun.
+    assert r_bg.json()["choices"][0]["message"]["content"] == "".join(f"t{i} " for i in range(60))
+    preempted = [e for e in ev.recent() if e["type"] == "job.preempted"]
+    assert len(preempted) == 1 and preempted[0]["wasted_tokens"] > 0
+    done_bg = [e for e in ev.recent() if e["type"] == "job.completed" and e["job"] == r_bg.headers["X-LRM-Job-Id"]]
+    assert done_bg[0]["preemptions"] == 1
+    assert len([p for p, _ in fake.requests if p == "/api/chat"]) == 3  # bg, interactive, bg rerun
+    # Interactive waited for a cancel, not for the ~1 s of background generation left.
+    wait_ms = float(r_i.headers["X-LRM-Queue-Wait-Ms"])
+    assert wait_ms < 300, wait_ms
+    assert sched.status()["running"] == [] and sched.status()["queued"] == []
+    print(f"interactive queue wait {wait_ms:.0f} ms; background preempted after "
+          f"{preempted[0]['wasted_tokens']} tokens")
+
+
+@pytest.mark.anyio
+async def test_background_streaming_chat_is_not_preempted(backend):
+    fake, url = backend
+    fake.reset(n_tokens=30, delay=0.02)
+    async with gateway(url, preempt=True) as (c, sched, ev):
+        bg_task = asyncio.create_task(c.post("/v1/chat/completions", json={**CHAT, "stream": True},
+                                             headers={"X-LRM-Priority": "background"}))
+        await wait_running(sched)
+        r_i = await c.post("/v1/chat/completions", json=CHAT, headers={"X-LRM-Priority": "interactive"})
+        r_bg = await bg_task
+    assert r_i.status_code == r_bg.status_code == 200
+    assert not [e for e in ev.recent() if e["type"] in ("job.preempt_requested", "job.preempted")]
+
+
 @pytest.mark.anyio
 async def test_bad_requests_are_400_without_creating_jobs(backend):
     fake, url = backend

@@ -12,18 +12,21 @@ import time
 from typing import Any, Callable
 
 from .events import EventLog
-from .job import Job, JobState
+from .job import Job, JobState, Priority
 from .policies import Policy, fcfs
 
 
 class Scheduler:
     def __init__(self, events: EventLog, *, default_limit: int = 1,
                  model_limits: dict[str, int] | None = None, policy: Policy = fcfs,
+                 preempt: bool = False, max_preemptions: int = 2,
                  now: Callable[[], float] = time.monotonic):
         self.events = events
         self.default_limit = default_limit
         self.model_limits = dict(model_limits or {})
         self.policy = policy
+        self.preempt = preempt
+        self.max_preemptions = max_preemptions
         self.now = now
         self._queue: list[Job] = []
         self._waiters: dict[str, asyncio.Future[None]] = {}
@@ -51,6 +54,8 @@ class Scheduler:
                          priority=job.priority.value, label=job.label or None,
                          queued_ahead=len(self._queue) - 1, running_on_model=[j.id for j in running])
         self._tick()
+        if job.state is JobState.QUEUED:
+            self._maybe_preempt(job)
         try:
             await fut
         except asyncio.CancelledError:
@@ -83,6 +88,40 @@ class Scheduler:
         fields.update(info)
         self.events.emit(f"job.{outcome.value}", job.id, **fields)
         self._tick()
+
+    def requeue(self, job: Job, reason: str, **info: Any) -> None:
+        """Give up a running job's slot without finishing it ("preempted" or "yielded").
+        The caller then calls acquire() again for the same job."""
+        if job.state is not JobState.RUNNING:
+            return
+        self._running[job.key].remove(job)
+        job.state = JobState.QUEUED
+        job.preempt_requested = False
+        job.on_preempt = None
+        self.events.emit(f"job.{reason}", job.id, run_s=round(self.now() - job.dispatch_t, 4), **info)
+        self._tick()
+
+    def _maybe_preempt(self, arriving: Job) -> None:
+        """An interactive job just queued behind a full model: cancel-and-requeue one
+        preemptible background job on that model, if there is one. Picks the one that
+        started most recently (least work thrown away)."""
+        if not self.preempt or arriving.priority is not Priority.INTERACTIVE:
+            return
+        victims = [r for r in self._running.get(arriving.key, [])
+                   if r.preemptible and r.priority is Priority.BACKGROUND and r.on_preempt is not None
+                   and not r.preempt_requested and r.preemptions < self.max_preemptions]
+        if not victims:
+            return
+        victim = max(victims, key=lambda r: r.dispatch_t)
+        victim.preempt_requested = True
+        victim.preemptions += 1
+        desc = victim.describe()
+        arriving.blocked_by = [f"{d} [preempted]" if d == desc else d for d in arriving.blocked_by]
+        self.events.emit("job.preempt_requested", victim.id, by=arriving.id,
+                         preemption=f"{victim.preemptions}/{self.max_preemptions}",
+                         reason=f"interactive {arriving.id} is waiting for {arriving.key}; "
+                                f"cancelling {desc} and requeueing it with its original place in line")
+        victim.on_preempt()
 
     def mark_first_token(self, job: Job) -> None:
         if job.first_token_t is None:

@@ -125,8 +125,8 @@ def create_app(adapter, scheduler: Scheduler, events: EventLog,
             task.cancel()
             raise
 
-    async def wait_for_slot(request: Request, job: Job) -> bool:
-        got, _ = await until_done_or_disconnect(request, scheduler.acquire(job))
+    async def wait_for_slot(request: Request, job: Job, keep_seniority: bool = False) -> bool:
+        got, _ = await until_done_or_disconnect(request, scheduler.acquire(job, keep_seniority))
         if not got and job.state is JobState.RUNNING:
             # The slot was granted in the same instant the disconnect was noticed.
             scheduler.release(job, JobState.CANCELLED, stage="dispatched_then_disconnected")
@@ -173,6 +173,39 @@ def create_app(adapter, scheduler: Scheduler, events: EventLog,
             return Response(status_code=CLIENT_CLOSED)
         return result
 
+    async def run_preemptible_chat(request: Request, job: Job, body: dict) -> dict | Response | None:
+        """Like run_simple for a non-streaming chat, but the scheduler may preempt it.
+        Returns None if preempted (slot already given up; caller re-acquires and retries)."""
+        progress = {"tokens": 0}
+        task = asyncio.ensure_future(collect_chat(adapter, body, progress))
+        started = time.monotonic()
+        if job.preemptible:
+            job.on_preempt = task.cancel
+        try:
+            finished, result = await until_done_or_disconnect(request, task)
+        except asyncio.CancelledError:
+            me = asyncio.current_task()
+            if job.preempt_requested and not (me and me.cancelling()):
+                # The backend call was cancelled by preemption, not this handler.
+                scheduler.requeue(job, "preempted", wasted_tokens=progress["tokens"],
+                                  wasted_s=round(time.monotonic() - started, 3),
+                                  preemptions=job.preemptions)
+                return None
+            scheduler.release(job, JobState.CANCELLED, stage="handler_cancelled")
+            raise
+        except BackendError as e:
+            scheduler.release(job, JobState.FAILED, error=e.message, backend_status=e.status)
+            return backend_error_response(e, job)
+        except Exception as e:
+            scheduler.release(job, JobState.FAILED, error=f"gateway error: {e!r}")
+            raise
+        finally:
+            job.on_preempt = None
+        if not finished:
+            scheduler.release(job, JobState.CANCELLED, stage="client_disconnected")
+            return Response(status_code=CLIENT_CLOSED)
+        return result
+
     # ------------------------------------------------------------ routes
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
@@ -181,16 +214,24 @@ def create_app(adapter, scheduler: Scheduler, events: EventLog,
             return parsed
         req, body, prio = parsed
         job = scheduler.new_job("chat", body["model"], prio)
+        # Only background, non-streaming chat can be preempted: its client sees nothing until
+        # the end, so a rerun is invisible apart from the delay. Streamed tokens can't be taken back.
+        job.preemptible = not req.get("stream") and prio is Priority.BACKGROUND
         if not await wait_for_slot(request, job):
             return Response(status_code=CLIENT_CLOSED)
         cid, created, model = f"chatcmpl-{job.id}", int(time.time()), body["model"]
 
         if not req.get("stream"):
-            result = await run_simple(request, job, collect_chat(adapter, body, {}))
+            while True:
+                result = await run_preemptible_chat(request, job, body)
+                if result is not None:
+                    break
+                if not await wait_for_slot(request, job, keep_seniority=True):
+                    return Response(status_code=CLIENT_CLOSED)
             if isinstance(result, Response):
                 return result
             scheduler.mark_first_token(job)  # non-streaming: first byte = whole answer
-            scheduler.release(job, JobState.COMPLETED, **oa.timings_from(result))
+            scheduler.release(job, JobState.COMPLETED, preemptions=job.preemptions, **oa.timings_from(result))
             return JSONResponse(oa.chat_response(result, cid, created, model), headers=job_headers(job))
 
         # Streaming. Open the upstream stream first (this is where a model load happens and

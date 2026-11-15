@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Callable
 
 
 class Priority(str, Enum):
@@ -49,6 +50,12 @@ class Job:
     enqueue_t: float | None = None
     label: str = ""                       # e.g. "chunk 3/60", shown in explanations
     blocked_by: list[str] = field(default_factory=list)  # jobs that held the slot while this one waited
+    # Preemption (cancel and requeue). The gateway sets `preemptible` and, while the job
+    # runs, `on_preempt` (cancels its backend call). The scheduler only decides.
+    preemptible: bool = False
+    preemptions: int = 0
+    preempt_requested: bool = False
+    on_preempt: Callable[[], object] | None = field(default=None, repr=False)
 
     def describe(self) -> str:
         extra = f", {self.label}" if self.label else ""

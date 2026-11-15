@@ -190,6 +190,78 @@ async def test_aging_policy_in_scheduler_lets_interactive_jump_then_ages_backgro
     await asyncio.gather(t_bg, t_i, t_late)
 
 
+def preempt_setup(**kw):
+    from lrm.core.policies import make_aging
+    clock = FakeClock()
+    ev = EventLog(now=clock)
+    return Scheduler(ev, policy=make_aging(15), preempt=True, now=clock, **kw), ev, clock
+
+
+async def start_bg(s, preemptible=True, priority=Priority.BACKGROUND):
+    bg = s.new_job("chat", "qwen", priority)
+    bg.preemptible = preemptible
+    await s.acquire(bg)
+    calls = []
+    bg.on_preempt = lambda: calls.append(bg.id)
+    return bg, calls
+
+
+async def test_interactive_arrival_preempts_background_and_victim_keeps_its_place():
+    s, ev, clock = preempt_setup()
+    bg, calls = await start_bg(s)          # enqueued at t=0
+    clock.t = 1.0
+    other_bg = s.new_job("chat", "qwen", Priority.BACKGROUND)
+    t_other = asyncio.create_task(s.acquire(other_bg))  # enqueued at t=1, after bg
+    await settle()
+    clock.t = 5.0
+    inter = s.new_job("chat", "qwen", Priority.INTERACTIVE)
+    t_i = asyncio.create_task(s.acquire(inter))
+    await settle()
+    assert calls == [bg.id] and bg.preemptions == 1
+    # The gateway reacts to on_preempt by giving the slot back and re-acquiring.
+    s.requeue(bg, "preempted", wasted_tokens=12)
+    t_bg = asyncio.create_task(s.acquire(bg, keep_seniority=True))
+    await settle()
+    assert inter.state is JobState.RUNNING
+    s.release(inter, JobState.COMPLETED)
+    await settle()
+    assert bg.state is JobState.RUNNING, "victim kept its enqueue time, so it runs before other_bg"
+    d = [e for e in ev.recent() if e["type"] == "job.dispatched" and e["job"] == inter.id][0]
+    assert "[preempted]" in d["reason"]
+    assert [e["wasted_tokens"] for e in ev.recent() if e["type"] == "job.preempted"] == [12]
+    s.release(bg, JobState.COMPLETED)
+    await asyncio.gather(t_i, t_bg, t_other)
+
+
+@pytest.mark.parametrize("case", ["not_preemptible", "normal_priority", "preempt_off", "limit_reached"])
+async def test_preemption_does_not_happen_when_it_should_not(case):
+    s, ev, _ = preempt_setup(max_preemptions=1)
+    if case == "preempt_off":
+        s.preempt = False
+    bg, calls = await start_bg(s, preemptible=(case != "not_preemptible"),
+                               priority=Priority.NORMAL if case == "normal_priority" else Priority.BACKGROUND)
+    if case == "limit_reached":
+        bg.preemptions = 1
+    inter = s.new_job("chat", "qwen", Priority.INTERACTIVE)
+    t_i = asyncio.create_task(s.acquire(inter))
+    await settle()
+    assert calls == [] and inter.state is JobState.QUEUED
+    assert not [e for e in ev.recent() if e["type"] == "job.preempt_requested"]
+    s.release(bg, JobState.COMPLETED)
+    await t_i
+
+
+async def test_only_interactive_arrivals_preempt():
+    s, _, _ = preempt_setup()
+    bg, calls = await start_bg(s)
+    normal = s.new_job("chat", "qwen", Priority.NORMAL)
+    t_n = asyncio.create_task(s.acquire(normal))
+    await settle()
+    assert calls == []
+    s.release(bg, JobState.COMPLETED)
+    await t_n
+
+
 @pytest.mark.parametrize("seed", range(30))
 async def test_random_workload_invariants(seed):
     """Random arrivals, cancels and completions. Checks after every step:
