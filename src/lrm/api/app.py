@@ -53,6 +53,44 @@ def _sse(obj: Any) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
+async def collect_chat(adapter, body: dict[str, Any], progress: dict[str, int]) -> dict[str, Any]:
+    """Non-streaming chat, done by streaming from the backend and assembling the answer.
+
+    Why not Ollama's non-streaming mode: cancelling a *streaming* request is verified to
+    stop generation (Phase 1, E5), and streaming lets us count tokens as they arrive
+    (`progress["tokens"]`), which is the work lost if the request is preempted.
+    Returns a dict shaped like Ollama's non-streaming /api/chat response.
+    """
+    stream = await adapter.open_chat_stream(body)
+    content: list[str] = []
+    thinking: list[str] = []
+    final = None
+    try:
+        async for line in stream.lines():
+            if not line.strip():
+                continue
+            chunk = json.loads(line)
+            if chunk.get("error"):
+                raise BackendError(500, chunk["error"])
+            msg = chunk.get("message") or {}
+            for key, sink in (("content", content), ("thinking", thinking)):
+                if msg.get(key):
+                    sink.append(msg[key])
+                    progress["tokens"] = progress.get("tokens", 0) + 1
+            if chunk.get("done"):
+                final = chunk
+                break
+    finally:
+        with anyio.CancelScope(shield=True):
+            await stream.aclose()
+    if final is None:
+        raise BackendError(502, "backend stream ended without done", "backend_connection_lost")
+    message = {"role": "assistant", "content": "".join(content)}
+    if thinking:
+        message["thinking"] = "".join(thinking)
+    return {**final, "message": message}
+
+
 def create_app(adapter, scheduler: Scheduler, events: EventLog,
                *, disconnect_poll_s: float = 0.25) -> FastAPI:
 
@@ -148,7 +186,7 @@ def create_app(adapter, scheduler: Scheduler, events: EventLog,
         cid, created, model = f"chatcmpl-{job.id}", int(time.time()), body["model"]
 
         if not req.get("stream"):
-            result = await run_simple(request, job, adapter.chat(body))
+            result = await run_simple(request, job, collect_chat(adapter, body, {}))
             if isinstance(result, Response):
                 return result
             scheduler.mark_first_token(job)  # non-streaming: first byte = whole answer

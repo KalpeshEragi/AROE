@@ -147,12 +147,13 @@ async def test_chat_non_streaming(backend):
                          headers={"X-LRM-Priority": "interactive"})
     assert r.status_code == 200
     data = r.json()
-    assert data["choices"][0]["message"]["content"] == "ok"
+    assert data["choices"][0]["message"]["content"] == "t0 t1 t2 "
+    assert data["choices"][0]["finish_reason"] == "stop"
     assert data["usage"]["completion_tokens"] == 3
     job = r.headers["X-LRM-Job-Id"]
     assert float(r.headers["X-LRM-Queue-Wait-Ms"]) >= 0
     assert fake.requests[0][1]["options"] == {"num_predict": 16, "temperature": 0}
-    assert fake.requests[0][1]["stream"] is False
+    assert fake.requests[0][1]["stream"] is True  # always streamed upstream, assembled here
     assert types(ev, job) == ["job.arrived", "job.dispatched", "job.first_token", "job.completed"]
     assert ev.recent(job_id=job)[0]["priority"] == "interactive"
     done = ev.recent(job_id=job)[-1]
@@ -217,6 +218,18 @@ async def test_error_inside_stream_is_forwarded_and_job_failed(backend):
     payloads = sse_payloads(r.text)
     assert json.loads(payloads[-2])["error"]["message"] == "runner crashed"
     assert payloads[-1] == "[DONE]"
+    assert types(ev)[-1] == "job.failed"
+    assert sched.status()["running"] == []
+
+
+@pytest.mark.anyio
+async def test_error_inside_stream_fails_non_streaming_request(backend):
+    fake, url = backend
+    fake.reset(n_tokens=2, stream_error=True)
+    async with gateway(url) as (c, sched, ev):
+        r = await c.post("/v1/chat/completions", json=CHAT)
+    assert r.status_code == 502
+    assert r.json()["error"]["message"] == "runner crashed"
     assert types(ev)[-1] == "job.failed"
     assert sched.status()["running"] == []
 

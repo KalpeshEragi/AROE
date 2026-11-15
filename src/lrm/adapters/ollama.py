@@ -94,9 +94,6 @@ class OllamaAdapter:
             raise BackendError(resp.status, error_message(text))
         return _AiohttpChatStream(resp)
 
-    async def chat(self, body: dict[str, Any]) -> dict[str, Any]:
-        return await self._post("/api/chat", {**body, "stream": False})
-
     async def embed(self, body: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/api/embed", body)
 
