@@ -139,6 +139,7 @@ class Scheduler:
                          "running_s": round(now - j.dispatch_t, 3)}
                         for jobs in self._running.values() for j in jobs],
             "limits": {"default": self.default_limit, **self.model_limits},
+            "preempt": self.preempt, "max_preemptions": self.max_preemptions,
         }
 
     # ------------------------------------------------------------------ internals

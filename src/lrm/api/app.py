@@ -104,6 +104,8 @@ def create_app(adapter, scheduler: Scheduler, events: EventLog,
         events.close()
 
     app = FastAPI(title="Local AI Resource Manager", version="0.1.0", lifespan=lifespan)
+    app.state.scheduler = scheduler
+    app.state.embed_chunk = embed_chunk
 
     # ------------------------------------------------------------ helpers
     async def until_done_or_disconnect(request: Request, aw: Awaitable[Any]) -> tuple[bool, Any]:
