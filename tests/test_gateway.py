@@ -31,8 +31,9 @@ class FakeOllama:
     def __init__(self):
         self.reset()
 
-    def reset(self, n_tokens=3, delay=0.0, fail_status=None, stream_error=False):
+    def reset(self, n_tokens=3, delay=0.0, fail_status=None, stream_error=False, embed_delay=0.0):
         self.n, self.delay, self.fail_status, self.stream_error = n_tokens, delay, fail_status, stream_error
+        self.embed_delay = embed_delay
         self.closed_early = threading.Event()  # backend saw the gateway hang up mid-stream
         self.finished = threading.Event()      # stream ran to the end
         self.requests = []
@@ -76,7 +77,11 @@ class FakeOllama:
         self.requests.append(("/api/embed", body))
         if self.fail_status:
             return self._fail()
-        return JSONResponse({"embeddings": [[0.5, 0.25]] * len(body["input"]), "prompt_eval_count": 7})
+        if self.embed_delay:
+            await asyncio.sleep(self.embed_delay)
+        # One distinct vector per input (its length), so tests can check order after chunking.
+        return JSONResponse({"embeddings": [[float(len(t))] for t in body["input"]],
+                             "prompt_eval_count": 7})
 
     async def tags(self, request: Request):
         return JSONResponse({"models": [{"name": "qwen3.5:4b"}, {"name": "bge-m3:latest"}]})
@@ -281,6 +286,43 @@ async def test_background_streaming_chat_is_not_preempted(backend):
         r_bg = await bg_task
     assert r_i.status_code == r_bg.status_code == 200
     assert not [e for e in ev.recent() if e["type"] in ("job.preempt_requested", "job.preempted")]
+
+
+@pytest.mark.anyio
+async def test_large_embedding_request_is_chunked_and_reassembled_in_order(backend):
+    fake, url = backend
+    fake.reset()
+    inputs = ["x" * (i + 1) for i in range(70)]
+    async with gateway(url) as (c, sched, ev):
+        r = await c.post("/v1/embeddings", json={"model": "bge-m3", "input": inputs})
+    assert r.status_code == 200
+    assert [d["embedding"][0] for d in r.json()["data"]] == [float(i + 1) for i in range(70)]
+    assert [len(b["input"]) for p, b in fake.requests if p == "/api/embed"] == [32, 32, 6]
+    assert r.json()["usage"]["prompt_tokens"] == 21  # 7 per backend call
+    done = ev.recent(job_id=r.headers["X-LRM-Job-Id"])[-1]
+    assert done["type"] == "job.completed" and done["chunks"] == 3 and done["n_inputs"] == 70
+    assert [e["chunk"] for e in ev.recent() if e["type"] == "job.yielded"] == ["1/3", "2/3"]
+
+
+@pytest.mark.anyio
+async def test_interactive_embedding_cuts_in_between_background_chunks(backend):
+    fake, url = backend
+    fake.reset(embed_delay=0.1)  # each backend embedding call takes 0.1 s
+    async with gateway(url) as (c, sched, ev):
+        bg = asyncio.create_task(c.post("/v1/embeddings", json={"model": "bge-m3", "input": ["doc"] * 320},
+                                        headers={"X-LRM-Priority": "background"}))  # 10 chunks, ~1 s
+        await wait_running(sched)
+        await asyncio.sleep(0.15)
+        r_i = await c.post("/v1/embeddings", json={"model": "bge-m3", "input": "query"},
+                           headers={"X-LRM-Priority": "interactive"})
+        r_bg = await bg
+    assert r_i.status_code == r_bg.status_code == 200
+    wait_ms = float(r_i.headers["X-LRM-Queue-Wait-Ms"])
+    assert wait_ms < 150, wait_ms  # at most the rest of one 0.1 s chunk, not the ~0.85 s left
+    d = [e for e in ev.recent() if e["type"] == "job.dispatched" and e["job"] == r_i.headers["X-LRM-Job-Id"]][0]
+    assert "background embed, chunk" in d["reason"]
+    assert len(r_bg.json()["data"]) == 320
+    print(f"interactive embedding waited {wait_ms:.0f} ms behind a 10-chunk background job")
 
 
 @pytest.mark.anyio

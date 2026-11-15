@@ -92,7 +92,8 @@ async def collect_chat(adapter, body: dict[str, Any], progress: dict[str, int]) 
 
 
 def create_app(adapter, scheduler: Scheduler, events: EventLog,
-               *, disconnect_poll_s: float = 0.25) -> FastAPI:
+               *, disconnect_poll_s: float = 0.25, embed_chunk: int = 32) -> FastAPI:
+    """`embed_chunk`: max inputs per backend embedding call (0 = never split)."""
 
     @asynccontextmanager
     async def lifespan(app):
@@ -288,13 +289,35 @@ def create_app(adapter, scheduler: Scheduler, events: EventLog,
             return parsed
         _req, body, prio = parsed
         job = scheduler.new_job("embed", body["model"], prio)
-        if not await wait_for_slot(request, job):
-            return Response(status_code=CLIENT_CLOSED)
-        result = await run_simple(request, job, adapter.embed(body))
-        if isinstance(result, Response):
-            return result
-        scheduler.release(job, JobState.COMPLETED, n_inputs=len(body["input"]), **oa.timings_from(result))
-        return JSONResponse(oa.embed_response(result, body["model"]), headers=job_headers(job))
+        # Large inputs run as chunks. Between chunks the job gives up its slot and queues
+        # again with a *fresh* enqueue time, so a long indexing job never ages up to the
+        # interactive level; an interactive query waits at most one chunk.
+        inputs = body["input"]
+        size = embed_chunk if embed_chunk and len(inputs) > embed_chunk else len(inputs)
+        parts = [inputs[i:i + size] for i in range(0, len(inputs), size)]
+        vectors: list = []
+        prompt_tokens = 0
+        for i, part in enumerate(parts):
+            if len(parts) > 1:
+                job.label = f"chunk {i + 1}/{len(parts)}"
+            if i > 0:
+                scheduler.requeue(job, "yielded", chunk=f"{i}/{len(parts)}")
+            if not await wait_for_slot(request, job):
+                return Response(status_code=CLIENT_CLOSED)
+            result = await run_simple(request, job, adapter.embed({**body, "input": part}))
+            if isinstance(result, Response):
+                return result
+            got = result.get("embeddings") or []
+            if len(got) != len(part):
+                e = BackendError(502, f"backend returned {len(got)} embeddings for {len(part)} inputs")
+                scheduler.release(job, JobState.FAILED, error=e.message)
+                return backend_error_response(e, job)
+            vectors.extend(got)
+            prompt_tokens += result.get("prompt_eval_count") or 0
+        scheduler.release(job, JobState.COMPLETED, n_inputs=len(inputs), chunks=len(parts),
+                          prompt_eval_count=prompt_tokens)
+        return JSONResponse(oa.embed_response({"embeddings": vectors, "prompt_eval_count": prompt_tokens},
+                                              body["model"]), headers=job_headers(job))
 
     @app.get("/v1/models")
     async def models():
