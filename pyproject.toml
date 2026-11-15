@@ -1,0 +1,28 @@
+[project]
+name = "lrm"
+version = "0.1.0"
+description = "Local AI Resource Manager: a scheduling gateway in front of local inference backends"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",   # HTTP routes and streaming responses
+    "uvicorn>=0.30",    # ASGI server
+    "aiohttp>=3.9",     # async streaming client for backends (~1.5 ms vs ~11.7 ms TTFT overhead with httpx)
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]  # httpx: test client for the gateway
+
+[project.scripts]
+lrm = "lrm.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["ollama: needs a running local Ollama (skipped otherwise)"]
