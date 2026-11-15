@@ -126,7 +126,7 @@ class Scheduler:
             for q in self._queue:  # everyone still waiting for this model now waits behind `job`
                 if q.key == job.key and job.describe() not in q.blocked_by:
                     q.blocked_by.append(job.describe())
-            if wait < 1e-3:
+            if not job.blocked_by:
                 reason = "slot free on arrival"
             else:
                 held = ", ".join(job.blocked_by) or "other jobs"

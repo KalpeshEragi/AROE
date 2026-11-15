@@ -149,6 +149,18 @@ async def test_reason_lists_every_job_that_ran_ahead():
     assert d["reason"].endswith(f"slot held by {first.id} (normal embed), {bg.id} (background embed, chunk 3/60)")
 
 
+async def test_reason_names_blocker_even_when_wait_is_under_a_millisecond():
+    s, ev, _ = make()  # fake clock never advances: the wait is exactly 0
+    a, b = (s.new_job("chat", "qwen", Priority.NORMAL) for _ in range(2))
+    await s.acquire(a)
+    tb = asyncio.create_task(s.acquire(b))
+    await settle()
+    s.release(a, JobState.COMPLETED)
+    await tb
+    d = [e for e in ev.recent() if e["type"] == "job.dispatched" and e["job"] == b.id][0]
+    assert "slot held by" in d["reason"] and a.id in d["reason"]
+
+
 async def test_aging_policy_in_scheduler_lets_interactive_jump_then_ages_background():
     from lrm.core.policies import make_aging
     clock = FakeClock()
