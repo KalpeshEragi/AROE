@@ -36,7 +36,12 @@ class Scheduler:
     def limit(self, key: str) -> int:
         return self.model_limits.get(key, self.default_limit)
 
-    async def acquire(self, job: Job) -> None:
+    async def acquire(self, job: Job, keep_seniority: bool = False) -> None:
+        """Wait for a dispatch slot. `keep_seniority=True` re-queues the job with its
+        previous enqueue time (used after preemption)."""
+        if not keep_seniority or job.enqueue_t is None:
+            job.enqueue_t = self.now()
+        job.state = JobState.QUEUED
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._waiters[job.id] = fut
         self._queue.append(job)
@@ -87,8 +92,9 @@ class Scheduler:
     def status(self) -> dict[str, Any]:
         now = self.now()
         return {
+            "policy": getattr(self.policy, "__name__", "custom"),
             "queued": [{"id": j.id, "model": j.key, "priority": j.priority.value,
-                        "kind": j.kind, "waiting_s": round(now - j.arrival_t, 3)} for j in self._queue],
+                        "kind": j.kind, "waiting_s": round(now - j.enqueue_t, 3)} for j in self._queue],
             "running": [{"id": j.id, "model": j.key, "priority": j.priority.value, "kind": j.kind,
                          "running_s": round(now - j.dispatch_t, 3)}
                         for jobs in self._running.values() for j in jobs],
@@ -108,14 +114,14 @@ class Scheduler:
     def _tick(self) -> None:
         """Start every job the policy allows. Called on arrival, release and cancel."""
         while True:
-            job = self.policy(self._queue, self._can_run)
+            job = self.policy(self._queue, self._can_run, self.now())
             if job is None:
                 return
             self._remove(job)
             self._running.setdefault(job.key, []).append(job)
             job.state = JobState.RUNNING
             job.dispatch_t = self.now()
-            wait = job.dispatch_t - job.arrival_t
+            wait = job.dispatch_t - job.enqueue_t
             reason = ("slot free on arrival" if wait < 1e-3 else
                       f"waited {wait:.2f}s for a free slot on {job.key} (limit {self.limit(job.key)})")
             self.events.emit("job.dispatched", job.id, wait_s=round(wait, 4),

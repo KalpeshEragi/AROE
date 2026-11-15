@@ -130,6 +130,35 @@ async def test_wait_time_and_reason_recorded():
     assert "waited 3.50s" in d["reason"] and "qwen:latest" in d["reason"]
 
 
+async def test_aging_policy_in_scheduler_lets_interactive_jump_then_ages_background():
+    from lrm.core.policies import make_aging
+    clock = FakeClock()
+    ev = EventLog(now=clock)
+    s = Scheduler(ev, policy=make_aging(10), now=clock)
+    running = s.new_job("chat", "qwen", Priority.NORMAL)
+    await s.acquire(running)
+    bg = s.new_job("chat", "qwen", Priority.BACKGROUND)
+    t_bg = asyncio.create_task(s.acquire(bg))
+    await settle()
+    clock.t = 1.0
+    inter = s.new_job("chat", "qwen", Priority.INTERACTIVE)
+    t_i = asyncio.create_task(s.acquire(inter))
+    await settle()
+    s.release(running, JobState.COMPLETED)   # t=1: bg is level 2, interactive level 0
+    await settle()
+    assert inter.state is JobState.RUNNING and bg.state is JobState.QUEUED
+    clock.t = 25.0                            # bg waited 25 s -> level 0
+    late = s.new_job("chat", "qwen", Priority.INTERACTIVE)
+    t_late = asyncio.create_task(s.acquire(late))
+    await settle()
+    s.release(inter, JobState.COMPLETED)
+    await settle()
+    assert bg.state is JobState.RUNNING and late.state is JobState.QUEUED
+    assert s.status()["policy"] == "priority_aging"
+    s.release(bg, JobState.COMPLETED)
+    await asyncio.gather(t_bg, t_i, t_late)
+
+
 @pytest.mark.parametrize("seed", range(30))
 async def test_random_workload_invariants(seed):
     """Random arrivals, cancels and completions. Checks after every step:

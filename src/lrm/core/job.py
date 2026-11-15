@@ -41,8 +41,12 @@ class Job:
     kind: str                 # "chat" or "embed"
     model: str
     priority: Priority
-    arrival_t: float          # scheduler clock (monotonic seconds)
+    arrival_t: float          # scheduler clock (monotonic seconds); never changes
     id: str = field(default_factory=lambda: f"j{next(_ids)}")
+    # When this job last joined the queue. Policies order and age by this. Normally equal
+    # to the latest acquire() time; a job that was preempted keeps its old value so it
+    # does not lose its place.
+    enqueue_t: float | None = None
     state: JobState = JobState.QUEUED
     dispatch_t: float | None = None
     first_token_t: float | None = None
