@@ -1,0 +1,5 @@
+{"env": {"ollama_version": "0.40.14", "gpu": "NVIDIA GeForce RTX 2050, 577.00, 4096 MiB", "wall_time": "2026-11-07T13:23:30+0530"}, "baseline_probe_ttft": [0.3599179000011645, 0.20439669999177568, 0.18147330000647344]}
+{"trial": 0, "long_chunks_before_cancel": 20, "long_error": null, "probe_ttft_s": 0.49736820001271553, "probe_sent_after_cancel_s": 4.509999416768551e-05, "gpu_util_mean_8s_after_probe": 4.0}
+{"trial": 1, "long_chunks_before_cancel": 23, "long_error": null, "probe_ttft_s": 0.4036969000007957, "probe_sent_after_cancel_s": 2.020000829361379e-05, "gpu_util_mean_8s_after_probe": 3.230769230769231}
+{"trial": 2, "long_chunks_before_cancel": 23, "long_error": null, "probe_ttft_s": 0.4110166000027675, "probe_sent_after_cancel_s": 2.759997732937336e-05, "gpu_util_mean_8s_after_probe": 1.2820512820512822}
+{"log_hints": ["srv          stop: cancel task, id_task = 2560", "srv          stop: cancel task, id_task = 2594", "srv          stop: cancel task, id_task = 2630"]}
