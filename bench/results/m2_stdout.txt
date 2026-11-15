@@ -1,0 +1,16 @@
+﻿direct 0 interactive TTFT 41.87s batch 43.6s statuses [200, 200, 200, 200] 200
+direct 1 interactive TTFT 39.53s batch 41.3s statuses [200, 200, 200, 200] 200
+direct 2 interactive TTFT 39.34s batch 41.1s statuses [200, 200, 200, 200] 200
+{"config": "direct", "trials": 3, "interactive_ttft_s": [41.86659149998741, 39.533798699994804, 39.33956959999341], "interactive_ttft_median_s": 39.533798699994804, "bg_batch_median_s": 41.34407409999403, "preemptions_total": 0, "wasted_tokens_total": 0}
+gw_fcfs 0 interactive TTFT 39.01s batch 40.8s statuses [200, 200, 200, 200] 200
+gw_fcfs 1 interactive TTFT 39.68s batch 41.5s statuses [200, 200, 200, 200] 200
+gw_fcfs 2 interactive TTFT 40.94s batch 42.7s statuses [200, 200, 200, 200] 200
+{"config": "gw_fcfs", "trials": 3, "interactive_ttft_s": [39.01492000000144, 39.6790949000133, 40.93884179998713], "interactive_ttft_median_s": 39.6790949000133, "bg_batch_median_s": 41.45455789999687, "preemptions_total": 0, "wasted_tokens_total": 0}
+gw_aging 0 interactive TTFT 9.47s batch 41.8s statuses [200, 200, 200, 200] 200
+gw_aging 1 interactive TTFT 9.63s batch 41.5s statuses [200, 200, 200, 200] 200
+gw_aging 2 interactive TTFT 9.58s batch 41.6s statuses [200, 200, 200, 200] 200
+{"config": "gw_aging", "trials": 3, "interactive_ttft_s": [9.468976699994528, 9.625118199997814, 9.584046599993599], "interactive_ttft_median_s": 9.584046599993599, "bg_batch_median_s": 41.6349607000011, "preemptions_total": 0, "wasted_tokens_total": 0}
+gw_preempt 0 interactive TTFT 0.50s batch 42.4s statuses [200, 200, 200, 200] 200
+gw_preempt 1 interactive TTFT 0.48s batch 42.2s statuses [200, 200, 200, 200] 200
+gw_preempt 2 interactive TTFT 0.49s batch 42.9s statuses [200, 200, 200, 200] 200
+{"config": "gw_preempt", "trials": 3, "interactive_ttft_s": [0.4960352999914903, 0.4789310000051046, 0.4946754999982659], "interactive_ttft_median_s": 0.4946754999982659, "bg_batch_median_s": 42.39853760000551, "preemptions_total": 3, "wasted_tokens_total": 12}
