@@ -46,9 +46,10 @@ class Scheduler:
         self._waiters[job.id] = fut
         self._queue.append(job)
         running = self._running.get(job.key, [])
+        job.blocked_by = [r.describe() for r in running]
         self.events.emit("job.arrived", job.id, kind=job.kind, model=job.key,
-                         priority=job.priority.value, queued_ahead=len(self._queue) - 1,
-                         running_on_model=[j.id for j in running])
+                         priority=job.priority.value, label=job.label or None,
+                         queued_ahead=len(self._queue) - 1, running_on_model=[j.id for j in running])
         self._tick()
         try:
             await fut
@@ -122,8 +123,15 @@ class Scheduler:
             job.state = JobState.RUNNING
             job.dispatch_t = self.now()
             wait = job.dispatch_t - job.enqueue_t
-            reason = ("slot free on arrival" if wait < 1e-3 else
-                      f"waited {wait:.2f}s for a free slot on {job.key} (limit {self.limit(job.key)})")
+            for q in self._queue:  # everyone still waiting for this model now waits behind `job`
+                if q.key == job.key and job.describe() not in q.blocked_by:
+                    q.blocked_by.append(job.describe())
+            if wait < 1e-3:
+                reason = "slot free on arrival"
+            else:
+                held = ", ".join(job.blocked_by) or "other jobs"
+                reason = (f"waited {wait:.2f}s for {job.key} (limit {self.limit(job.key)}); "
+                          f"slot held by {held}")
             self.events.emit("job.dispatched", job.id, wait_s=round(wait, 4),
                              policy=getattr(self.policy, "__name__", "custom"), reason=reason)
             fut = self._waiters.get(job.id)

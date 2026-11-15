@@ -47,6 +47,12 @@ class Job:
     # to the latest acquire() time; a job that was preempted keeps its old value so it
     # does not lose its place.
     enqueue_t: float | None = None
+    label: str = ""                       # e.g. "chunk 3/60", shown in explanations
+    blocked_by: list[str] = field(default_factory=list)  # jobs that held the slot while this one waited
+
+    def describe(self) -> str:
+        extra = f", {self.label}" if self.label else ""
+        return f"{self.id} ({self.priority.value} {self.kind}{extra})"
     state: JobState = JobState.QUEUED
     dispatch_t: float | None = None
     first_token_t: float | None = None

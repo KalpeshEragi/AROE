@@ -128,6 +128,25 @@ async def test_wait_time_and_reason_recorded():
     d = [e for e in ev.recent() if e["type"] == "job.dispatched" and e["job"] == b.id][0]
     assert d["wait_s"] == pytest.approx(3.5)
     assert "waited 3.50s" in d["reason"] and "qwen:latest" in d["reason"]
+    assert f"slot held by {a.id} (normal chat)" in d["reason"]
+
+
+async def test_reason_lists_every_job_that_ran_ahead():
+    s, ev, clock = make()
+    first, bg, me = (s.new_job("embed", "bge-m3", p) for p in (Priority.NORMAL, Priority.BACKGROUND, Priority.NORMAL))
+    bg.label = "chunk 3/60"
+    await s.acquire(first)
+    t_bg = asyncio.create_task(s.acquire(bg))
+    await settle()
+    t_me = asyncio.create_task(s.acquire(me))
+    await settle()
+    clock.t = 2.0
+    s.release(first, JobState.COMPLETED)
+    await settle()
+    s.release(bg, JobState.COMPLETED)
+    await asyncio.gather(t_bg, t_me)
+    d = [e for e in ev.recent() if e["type"] == "job.dispatched" and e["job"] == me.id][0]
+    assert d["reason"].endswith(f"slot held by {first.id} (normal embed), {bg.id} (background embed, chunk 3/60)")
 
 
 async def test_aging_policy_in_scheduler_lets_interactive_jump_then_ages_background():
